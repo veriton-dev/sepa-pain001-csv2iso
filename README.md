@@ -1,3 +1,8 @@
+> **Safety warning (2026-11-14): Do not use this version to prepare or submit real payments.**
+> A quoted CSV amount such as `12,50` can be silently converted to `1250.00`.
+> Additional CSV-validation defects have been identified. A fix is under review;
+> bank and schema validation have not been established.
+
 # SEPA pain.001 CSV → ISO 20022 XML
 
 Dependency-free Python CLI that converts a payment CSV into
