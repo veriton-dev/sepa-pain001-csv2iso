@@ -13,18 +13,18 @@ class AmountSafety(unittest.TestCase):
             with self.subTest(value=value):
                 self.rows[0]['amount'] = value
                 with self.assertRaises(ValueError):
-                    build_pain001(self.rows)
+                    build_pain001(self.rows, reviewed_input=True)
     def test_exact_amount_and_totals(self):
         for value, expected in [('12.50', '12.50'), ('2.00', '2.00'), ('0.01', '0.01'), ('001.20', '1.20')]:
             with self.subTest(value=value):
                 self.rows[0]['amount'] = value
-                root = ET.fromstring(build_pain001(self.rows))
+                root = ET.fromstring(build_pain001(self.rows, reviewed_input=True))
                 self.assertEqual(root.find('.//p:InstdAmt', NS).text, expected)
                 self.assertEqual(Decimal(root.find('.//p:GrpHdr/p:CtrlSum', NS).text), Decimal(value)+Decimal('3.00'))
                 self.assertEqual(Decimal(root.find('.//p:PmtInf/p:CtrlSum', NS).text), Decimal(value)+Decimal('3.00'))
     def test_csv_quoted_comma_rejected(self):
         text = SAMPLE_CSV.replace('12.50', '"12,50"')
         with self.assertRaises(ValueError):
-            build_pain001(rows_from_csv(text))
+            build_pain001(rows_from_csv(text), reviewed_input=True)
 
 if __name__ == '__main__': unittest.main()

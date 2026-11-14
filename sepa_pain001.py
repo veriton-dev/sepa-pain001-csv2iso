@@ -10,7 +10,7 @@ Input CSV columns (header required, case-insensitive):
 
 Usage:
   python3 sepa_pain001.py payments.csv --reviewed-input -o pain001.xml
-  python3 sepa_pain001.py --self-test
+  python3 sepa_pain001.py --self-test --reviewed-input
 """
 from __future__ import annotations
 
@@ -199,7 +199,15 @@ def build_pain001(
     *,
     initiating_party: str = "Veriton SEPA Converter",
     msg_id: str | None = None,
+    reviewed_input: bool = False,
 ) -> str:
+    """Generate experimental XML only after explicit per-call review acknowledgement.
+
+    This acknowledgement does not verify review, schema compliance, or bank suitability.
+    Do not use the output for real payments.
+    """
+    if reviewed_input is not True:
+        raise ValueError("reviewed_input=True is required for every XML generation after independent input review; do not use for real payments")
     if not rows:
         raise ValueError("no payment rows")
     for label, value, limit in (("initiating_party", initiating_party, 70), ("msg_id", msg_id, 35)):
@@ -340,9 +348,10 @@ ACME GmbH,DE89370400440532013000,COBADEFFXXX,Office BV,NL91ABNA0417164300,ABNANL
 """
 
 
-def self_test() -> int:
+def self_test(*, reviewed_input: bool = False) -> int:
+    """Run the synthetic self-test after explicit acknowledgement."""
     rows = rows_from_csv(SAMPLE_CSV)
-    xml = build_pain001(rows, initiating_party="Veriton Self-Test", msg_id="MSGSELFTEST0001")
+    xml = build_pain001(rows, initiating_party="Veriton Self-Test", msg_id="MSGSELFTEST0001", reviewed_input=reviewed_input)
     assert "pain.001.001.03" in xml
     assert "<NbOfTxs>2</NbOfTxs>" in xml
     assert "<CtrlSum>15.50</CtrlSum>" in xml
@@ -356,7 +365,7 @@ def self_test() -> int:
         "A,DE89370400440532013000,B,NL91ABNA0417164300,-1\n"
     )
     try:
-        build_pain001(bad)
+        build_pain001(bad, reviewed_input=reviewed_input)
         raise AssertionError("expected validation error")
     except ValueError:
         pass
@@ -380,7 +389,9 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(SAMPLE_CSV)
         return 0
     if args.self_test:
-        return self_test()
+        if not args.reviewed_input:
+            p.error("--reviewed-input is required for every XML generation, including self-test")
+        return self_test(reviewed_input=args.reviewed_input)
     if not args.csv:
         p.error("csv path required (or --self-test)")
 
@@ -397,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         rows,
         initiating_party=args.initiating_party,
         msg_id=args.msg_id,
+        reviewed_input=args.reviewed_input,
     )
     if args.output:
         Path(args.output).write_text(xml, encoding="utf-8")

@@ -30,7 +30,7 @@ class CsvIntegrity(unittest.TestCase):
         self.assertEqual(rows[0]['debtor_name'], 'ACME, Inc.')
         self.assertEqual(rows[0]['creditor_name'], 'B "Shop"')
         self.assertEqual(rows[0]['remittance'], 'one, two\nthree')
-        root = ET.fromstring(build_pain001(rows))
+        root = ET.fromstring(build_pain001(rows, reviewed_input=True))
         self.assertEqual(root.find('.//p:InstdAmt', NS).text, '12.50')
         self.assertEqual(root.find('.//p:Ustrd', NS).text, 'one, two\nthree')
 
@@ -63,7 +63,7 @@ class ArithmeticIntegrity(unittest.TestCase):
         self.rows[1]['amount'] = '0.89'
         with localcontext() as ctx:
             ctx.prec = 4
-            root = ET.fromstring(build_pain001(self.rows))
+            root = ET.fromstring(build_pain001(self.rows, reviewed_input=True))
         self.assertEqual(root.find('.//p:GrpHdr/p:CtrlSum', NS).text, '123456790.01')
         self.assertEqual(root.find('.//p:PmtInf/p:CtrlSum', NS).text, '123456790.01')
         self.assertEqual([e.text for e in root.findall('.//p:InstdAmt', NS)], ['123456789.12', '0.89'])
@@ -71,34 +71,34 @@ class ArithmeticIntegrity(unittest.TestCase):
     def test_limit_and_sum_overflow(self):
         self.rows[0]['amount'] = '9999999999999999.98'
         self.rows[1]['amount'] = '0.01'
-        root = ET.fromstring(build_pain001(self.rows))
+        root = ET.fromstring(build_pain001(self.rows, reviewed_input=True))
         self.assertEqual(root.find('.//p:GrpHdr/p:CtrlSum', NS).text, '9999999999999999.99')
         self.rows[1]['amount'] = '0.02'
         with self.assertRaisesRegex(ValueError, 'control sum exceeds'):
-            build_pain001(self.rows)
+            build_pain001(self.rows, reviewed_input=True)
         self.rows[0]['amount'] = '10000000000000000.00'
         with self.assertRaisesRegex(ValueError, 'amount exceeds'):
-            build_pain001(self.rows)
+            build_pain001(self.rows, reviewed_input=True)
         self.rows[0]['amount'] = '9' * 5000 + '.00'
         with self.assertRaisesRegex(ValueError, 'amount exceeds'):
-            build_pain001(self.rows)
+            build_pain001(self.rows, reviewed_input=True)
 
     def test_sum_across_groups_also_bounded(self):
         self.rows[0]['amount'] = '9999999999999999.99'
         self.rows[1]['amount'] = '0.01'
         self.rows[1]['execution_date'] = '2026-09-16'
         with self.assertRaisesRegex(ValueError, 'control sum exceeds'):
-            build_pain001(self.rows)
+            build_pain001(self.rows, reviewed_input=True)
 
     def test_currency(self):
         for currency in ('USD', 'GBP', 'EU1', '€', 'EURO'):
             self.rows[0]['currency'] = currency
             with self.subTest(currency=currency), self.assertRaisesRegex(ValueError, 'currency must be EUR'):
-                build_pain001(self.rows)
+                build_pain001(self.rows, reviewed_input=True)
         for currency in ('EUR', 'eur', '', '  EUR  '):
             self.rows[0]['currency'] = currency
             with self.subTest(currency=currency):
-                self.assertEqual(ET.fromstring(build_pain001(self.rows)).find('.//p:InstdAmt', NS).attrib['Ccy'], 'EUR')
+                self.assertEqual(ET.fromstring(build_pain001(self.rows, reviewed_input=True)).find('.//p:InstdAmt', NS).attrib['Ccy'], 'EUR')
 
 if __name__ == '__main__':
     unittest.main()

@@ -21,7 +21,7 @@ Built for agent delivery (OpenTask SEPA one-off and similar jobs).
 ## Quick start
 
 ```bash
-python3 sepa_pain001.py --self-test
+python3 sepa_pain001.py --self-test --reviewed-input
 python3 sepa_pain001.py --sample-csv > payments.csv
 python3 sepa_pain001.py payments.csv --reviewed-input -o pain001.xml
 ```
@@ -61,7 +61,7 @@ MIT — Veriton (`veriton-dev`)
 
 **Not established as suitable for real payments.** The generated XML has not been validated against the official schema or any bank implementation.
 
-For each CLI conversion, `--reviewed-input` explicitly acknowledges that an independent human has reviewed the original source, the CSV mapping and every record. The flag is an acknowledgement, not proof of review. Programmatic callers of `rows_from_csv` / `build_pain001` must enforce the same per-run review themselves; the API does not enforce the CLI flag. Independently reconcile every generated payee, amount, currency, date and reference against the source before any further use.
+For each CLI conversion, `--reviewed-input` explicitly acknowledges that an independent human has reviewed the original source, the CSV mapping and every record. The flag is an acknowledgement, not proof of review. `build_pain001(...)` now requires the explicit keyword `reviewed_input=True` on every call; omitted, false, or merely truthy values fail closed. This is a breaking API change. `self_test(...)` also requires that acknowledgement because it generates and prints synthetic XML. The CLI requires `--reviewed-input` for conversions and self-test; `--sample-csv` only prints CSV. `rows_from_csv` parses data without generating XML. The acknowledgement is a caller assertion, not evidence of review and not a safety certification. Independently reconcile every generated payee, amount, currency, date and reference against the source before any further use.
 
 The fixed-point format rejects common unquoted decimal-comma shifts such as an amount parsed as `12` from `12,50`. It cannot eliminate ambiguity: a malformed balanced-width row may still pass all checks, including when shifted values happen to look valid. Amounts are parsed strictly to avoid silently turning `12,50` into `1250.00`.
 CSV structural validation cannot detect every locale ambiguity: for example, `1.234` is rejected, but syntactically valid `1.23` could still have been intended as a locale-specific grouping. Verify the source convention and every amount.
