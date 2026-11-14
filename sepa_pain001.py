@@ -9,7 +9,7 @@ Input CSV columns (header required, case-insensitive):
   end_to_end_id (optional), execution_date (optional YYYY-MM-DD)
 
 Usage:
-  python3 sepa_pain001.py payments.csv -o pain001.xml
+  python3 sepa_pain001.py payments.csv --reviewed-input -o pain001.xml
   python3 sepa_pain001.py --self-test
 """
 from __future__ import annotations
@@ -21,11 +21,37 @@ import re
 import sys
 import uuid
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$")
+AMOUNT_RE = re.compile(r"^[0-9]+\.[0-9]{2}$")
+# Local conservative bound: at most 18 digits total, including two cents
+# digits. Bank and schema limits must be validated separately.
+MAX_CENTS = 10**18 - 1
+
+
+def _amount_cents(value: str) -> int:
+    value = str(value).strip()
+    if not AMOUNT_RE.fullmatch(value):
+        raise ValueError("amount must use digits followed by a dot and exactly 2 decimals")
+    whole, _, fraction = value.partition(".")
+    # Strip insignificant zeroes before conversion, and limit length before int().
+    whole = whole.lstrip("0") or "0"
+    if len(whole) > 16:
+        raise ValueError("amount exceeds 18 total digits with 2 decimals")
+    cents = int(whole) * 100 + int(fraction.ljust(2, "0") or "0")
+    if cents == 0:
+        raise ValueError("amount must be >0")
+    if cents > MAX_CENTS:
+        raise ValueError("amount exceeds 18 total digits with 2 decimals")
+    return cents
+
+
+def _format_cents(cents: int) -> str:
+    return f"{cents // 100}.{cents % 100:02d}"
+
+
 BIC_RE = re.compile(r"^[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$")
 
 
@@ -45,14 +71,45 @@ def _msg_id() -> str:
     return "MSG" + uuid.uuid4().hex[:16].upper()
 
 
+def _check_xml_text(value: str, label: str) -> None:
+    # XML 1.0 legal characters, including exclusion of surrogate code points.
+    if any(not (ord(c) in (9, 10, 13) or 0x20 <= ord(c) <= 0xD7FF
+                or 0xE000 <= ord(c) <= 0xFFFD or 0x10000 <= ord(c) <= 0x10FFFF)
+           for c in value):
+        raise ValueError(f"{label}: illegal XML character")
+
+
 def _e2e(default_prefix: str, row_i: int, provided: str | None) -> str:
-    if provided and provided.strip():
-        return re.sub(r"[^A-Za-z0-9/?\-+:().,' ]", "", provided.strip())[:35]
+    if provided:
+        if not re.fullmatch(r"[A-Za-z0-9/?\-+:().,' ]{1,35}", provided) or not provided.strip():
+            raise ValueError(f"row {row_i}: invalid end_to_end_id (no sanitization performed)")
+        return provided
     return f"{default_prefix}{row_i:04d}"[:35]
 
 
 def validate_row(row: dict, idx: int) -> list[str]:
     errs: list[str] = []
+    for key, value in row.items():
+        if isinstance(value, str):
+            try:
+                _check_xml_text(value, f"row {idx} {key}")
+            except ValueError as exc:
+                errs.append(str(exc))
+    for key, limit in (("debtor_name", 70), ("creditor_name", 70), ("remittance", 140)):
+        if len(row.get(key) or "") > limit:
+            errs.append(f"row {idx}: {key} exceeds {limit} characters")
+    try:
+        _e2e("E2E", idx, row.get("end_to_end_id"))
+    except ValueError as exc:
+        errs.append(str(exc))
+    execution_date = (row.get("execution_date") or "").strip()
+    if execution_date:
+        try:
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", execution_date):
+                raise ValueError()
+            date.fromisoformat(execution_date)
+        except ValueError:
+            errs.append(f"row {idx}: invalid execution_date")
     for req in (
         "debtor_name",
         "debtor_iban",
@@ -73,22 +130,33 @@ def validate_row(row: dict, idx: int) -> list[str]:
         if bic and not BIC_RE.match(bic):
             errs.append(f"row {idx}: invalid {label}")
     try:
-        amt = Decimal(str(row.get("amount", "")).strip().replace(",", ""))
-        if amt <= 0 or amt.as_tuple().exponent < -2:
-            errs.append(f"row {idx}: amount must be >0 with max 2 decimal places")
-    except (InvalidOperation, ValueError):
-        errs.append(f"row {idx}: amount not a number")
+        _amount_cents(row.get("amount", ""))
+    except ValueError as exc:
+        errs.append(f"row {idx}: {exc}")
     cur = (row.get("currency") or "EUR").strip().upper() or "EUR"
-    if len(cur) != 3 or not cur.isalpha():
-        errs.append(f"row {idx}: currency must be ISO-4217 alpha-3")
+    if cur != "EUR":
+        errs.append(f"row {idx}: currency must be EUR")
     return errs
 
 
 def rows_from_csv(text: str) -> list[dict]:
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
+    _check_xml_text(text, "CSV input")
+    # strict=True rejects malformed quoted CSV rather than accepting partial records.
+    reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+    try:
+        headers = next(reader, None)
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV header: {exc}") from exc
+    if not headers:
         raise ValueError("CSV has no header row")
-    mapping = {_norm_header(h): h for h in reader.fieldnames if h}
+    mapping: dict[str, int] = {}
+    for index, header in enumerate(headers):
+        normalized = _norm_header(header)
+        if not normalized:
+            raise ValueError(f"empty CSV header at column {index + 1}")
+        if normalized in mapping:
+            raise ValueError(f"duplicate normalized CSV header: {normalized}")
+        mapping[normalized] = index
     aliases = {
         "debtor_name": ["debtor_name", "dbtr_nm", "from_name", "payer_name"],
         "debtor_iban": ["debtor_iban", "dbtr_iban", "from_iban", "payer_iban"],
@@ -102,18 +170,27 @@ def rows_from_csv(text: str) -> list[dict]:
         "end_to_end_id": ["end_to_end_id", "e2e_id", "endtoendid", "payment_id"],
         "execution_date": ["execution_date", "reqd_exctn_dt", "date", "value_date"],
     }
-    resolved: dict[str, str] = {}
+    resolved: dict[str, int] = {}
     for canon, alts in aliases.items():
-        for a in alts:
-            if a in mapping:
-                resolved[canon] = mapping[a]
-                break
+        found = [a for a in alts if a in mapping]
+        if len(found) > 1:
+            raise ValueError(f"conflicting CSV aliases for {canon}: {', '.join(found)}")
+        if found:
+            resolved[canon] = mapping[found[0]]
     out: list[dict] = []
-    for raw in reader:
-        if not any((v or "").strip() for v in raw.values()):
-            continue
-        row = {k: (raw.get(src) or "").strip() for k, src in resolved.items()}
-        out.append(row)
+    try:
+        for raw in reader:
+            # Empty physical lines are ignored by csv.reader; other records must
+            # have exactly the header width, even if every field is blank.
+            if not raw:
+                continue
+            if len(raw) != len(headers):
+                raise ValueError(f"CSV record ending at line {reader.line_num}: expected {len(headers)} fields, got {len(raw)}")
+            if not any(v.strip() for v in raw):
+                continue
+            out.append({k: (raw[src] if k == "end_to_end_id" else raw[src].strip()) for k, src in resolved.items()})
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV near line {reader.line_num}: {exc}") from exc
     return out
 
 
@@ -125,6 +202,11 @@ def build_pain001(
 ) -> str:
     if not rows:
         raise ValueError("no payment rows")
+    for label, value, limit in (("initiating_party", initiating_party, 70), ("msg_id", msg_id, 35)):
+        if value is not None:
+            _check_xml_text(value, label)
+            if not value.strip() or len(value) > limit:
+                raise ValueError(f"{label} must be nonblank and at most {limit} characters")
     errs: list[str] = []
     for i, r in enumerate(rows, 1):
         errs.extend(validate_row(r, i))
@@ -139,10 +221,18 @@ def build_pain001(
         diban = _clean_iban(r["debtor_iban"])
         cur = (r.get("currency") or "EUR").strip().upper() or "EUR"
         ex = (r.get("execution_date") or "").strip() or date.today().isoformat()
-        groups.setdefault((diban, ex, cur), []).append((i, r))
+        group = groups.setdefault((diban, ex, cur), [])
+        if group:
+            first = group[0][1]
+            if (r["debtor_name"].strip() != first["debtor_name"].strip()
+                    or _clean_bic(r.get("debtor_bic", "")) != _clean_bic(first.get("debtor_bic", ""))):
+                raise ValueError(f"row {i}: conflicting debtor name or BIC in group")
+        group.append((i, r))
 
     n_tx = len(rows)
-    ctrl = sum(Decimal(str(r["amount"]).replace(",", "")) for r in rows)
+    ctrl = sum(_amount_cents(r["amount"]) for r in rows)
+    if ctrl > MAX_CENTS:
+        raise ValueError("control sum exceeds 18 total digits with 2 decimals")
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -152,7 +242,7 @@ def build_pain001(
         f"      <MsgId>{escape(mid)}</MsgId>",
         f"      <CreDtTm>{created}</CreDtTm>",
         f"      <NbOfTxs>{n_tx}</NbOfTxs>",
-        f"      <CtrlSum>{ctrl:.2f}</CtrlSum>",
+        f"      <CtrlSum>{_format_cents(ctrl)}</CtrlSum>",
         "      <InitgPty>",
         f"        <Nm>{escape(initiating_party[:70])}</Nm>",
         "      </InitgPty>",
@@ -165,7 +255,7 @@ def build_pain001(
         first = items[0][1]
         dname = first["debtor_name"]
         dbic = _clean_bic(first.get("debtor_bic", ""))
-        g_sum = sum(Decimal(str(r["amount"]).replace(",", "")) for _, r in items)
+        g_sum = sum(_amount_cents(r["amount"]) for _, r in items)
         g_n = len(items)
         pmt_id = f"PMT{pmt_i:04d}"
         parts += [
@@ -174,7 +264,7 @@ def build_pain001(
             "      <PmtMtd>TRF</PmtMtd>",
             "      <BtchBookg>false</BtchBookg>",
             f"      <NbOfTxs>{g_n}</NbOfTxs>",
-            f"      <CtrlSum>{g_sum:.2f}</CtrlSum>",
+            f"      <CtrlSum>{_format_cents(g_sum)}</CtrlSum>",
             "      <PmtTpInf>",
             "        <SvcLvl><Cd>SEPA</Cd></SvcLvl>",
             "      </PmtTpInf>",
@@ -200,7 +290,7 @@ def build_pain001(
             ]
 
         for idx, r in items:
-            amt = Decimal(str(r["amount"]).replace(",", ""))
+            amt = _amount_cents(r["amount"])
             ciban = _clean_iban(r["creditor_iban"])
             cbic = _clean_bic(r.get("creditor_bic", ""))
             cname = r["creditor_name"]
@@ -211,7 +301,7 @@ def build_pain001(
                 "        <PmtId>",
                 f"          <EndToEndId>{escape(e2e)}</EndToEndId>",
                 "        </PmtId>",
-                f'        <Amt><InstdAmt Ccy="{escape(cur)}">{amt:.2f}</InstdAmt></Amt>',
+                f'        <Amt><InstdAmt Ccy="{escape(cur)}">{_format_cents(amt)}</InstdAmt></Amt>',
             ]
             if cbic:
                 parts += [
@@ -282,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--initiating-party", default="Veriton SEPA Converter")
     p.add_argument("--msg-id", default=None)
     p.add_argument("--self-test", action="store_true")
+    p.add_argument("--reviewed-input", action="store_true", help="acknowledge independent review of this input for this run")
     p.add_argument("--sample-csv", action="store_true", help="print sample CSV and exit")
     args = p.parse_args(argv)
 
@@ -292,6 +383,9 @@ def main(argv: list[str] | None = None) -> int:
         return self_test()
     if not args.csv:
         p.error("csv path required (or --self-test)")
+
+    if not args.reviewed_input:
+        p.error("--reviewed-input is required for every CSV conversion after independent input review")
 
     if args.csv == "-":
         text = sys.stdin.read()

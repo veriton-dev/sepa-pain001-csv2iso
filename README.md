@@ -1,15 +1,20 @@
-> **Safety warning (2026-11-14): Do not use this version to prepare or submit real payments.**
-> A quoted CSV amount such as `12,50` can silently become `1250.00`; duplicate amount
-> headers can also select the wrong value. Invalid dates and non-EUR currencies can pass.
-> If you have used this tool, independently reconcile each amount, beneficiary, account,
-> currency and date against the original instructions. Contact your bank promptly if a
-> submitted instruction may be incorrect. A fix is under review; bank and schema
-> validation have not been established. This notice does not reach existing clones.
+> **Safety warning (2026-11-14): Do not use this tool to prepare or submit real payments.**
+> Prior versions could silently change quoted CSV amounts such as `12,50` into
+> `1250.00`, and duplicate headers could select the wrong value. Invalid dates and
+> non-EUR currencies could pass. If you have used an earlier version, independently
+> reconcile each amount, beneficiary, account, currency and date against the original
+> instructions. Contact your bank promptly if a submitted instruction may be incorrect.
+> This notice does not reach existing clones. CSV ambiguity remains; bank compatibility
+> and XSD conformance have not been verified.
 
-# SEPA pain.001 CSV → ISO 20022 XML
+# Experimental SEPA pain.001 CSV → XML
+
+**Do not use for real payment preparation.** This is an experimental converter;
+CSV ambiguity can silently alter interpreted data. Its output has not been
+validated against the official schema or any bank.
 
 Dependency-free Python CLI that converts a payment CSV into
-**ISO 20022 `pain.001.001.03`** (SEPA Credit Transfer initiation).
+XML using the `pain.001.001.03` namespace (SEPA Credit Transfer initiation).
 
 Built for agent delivery (OpenTask SEPA one-off and similar jobs).
 
@@ -18,7 +23,7 @@ Built for agent delivery (OpenTask SEPA one-off and similar jobs).
 ```bash
 python3 sepa_pain001.py --self-test
 python3 sepa_pain001.py --sample-csv > payments.csv
-python3 sepa_pain001.py payments.csv -o pain001.xml
+python3 sepa_pain001.py payments.csv --reviewed-input -o pain001.xml
 ```
 
 ## CSV columns
@@ -31,8 +36,8 @@ python3 sepa_pain001.py payments.csv -o pain001.xml
 | `creditor_name` | yes | |
 | `creditor_iban` | yes | |
 | `creditor_bic` | no | |
-| `amount` | yes | >0, max 2 dp |
-| `currency` | no | default `EUR` |
+| `amount` | yes | >0, digits followed by a decimal point and exactly two decimal digits (e.g. `12.00`); no commas, signs, or exponent notation |
+| `currency` | no | EUR only (case-insensitive); blank defaults to `EUR` |
 | `remittance` | no | unstructured ≤140 |
 | `end_to_end_id` | no | auto if empty |
 | `execution_date` | no | `YYYY-MM-DD`, default today |
@@ -42,10 +47,25 @@ Aliases accepted: `from_iban`/`to_iban`, `payer_name`/`payee_name`, `amt`, `refe
 ## Validation
 
 - IBAN / BIC shape checks
-- Positive amount, ≤2 decimal places
+- Positive amount with exactly two decimal places; individual amounts and the total control sum are limited to 18 digits including two decimal places (maximum `9999999999999999.99`), a conservative local bound (not a claim of bank or schema conformance). Arithmetic uses integer cents, independent of decimal context.
+- Rejects duplicate normalized headers, conflicting aliases, malformed quoted CSV, and records with missing or extra fields. Only EUR is accepted.
+- Calendar-validates provided execution dates; rejects illegal XML characters, invalid end-to-end IDs, conflicting debtor names/BICs in a group, and names/remittance exceeding local output limits.
 - Groups multiple creditors under one debtor into `PmtInf` batches
 - Header `NbOfTxs` + `CtrlSum` match body
 
 ## License
 
 MIT — Veriton (`veriton-dev`)
+
+## Safety and limitations
+
+**Not established as suitable for real payments.** The generated XML has not been validated against the official schema or any bank implementation.
+
+For each CLI conversion, `--reviewed-input` explicitly acknowledges that an independent human has reviewed the original source, the CSV mapping and every record. The flag is an acknowledgement, not proof of review. Programmatic callers of `rows_from_csv` / `build_pain001` must enforce the same per-run review themselves; the API does not enforce the CLI flag. Independently reconcile every generated payee, amount, currency, date and reference against the source before any further use.
+
+The fixed-point format rejects common unquoted decimal-comma shifts such as an amount parsed as `12` from `12,50`. It cannot eliminate ambiguity: a malformed balanced-width row may still pass all checks, including when shifted values happen to look valid. Amounts are parsed strictly to avoid silently turning `12,50` into `1250.00`.
+CSV structural validation cannot detect every locale ambiguity: for example, `1.234` is rejected, but syntactically valid `1.23` could still have been intended as a locale-specific grouping. Verify the source convention and every amount.
+Conversion does not send payments. This tool is not bank-certified: IBAN checks
+are shape-only, not checksums; execution dates are checked as calendar dates but not bank business dates; XML schema, SEPA eligibility and bank-specific requirements are unverified. Independently verify every file
+with your bank and review all payees, amounts, currency and dates before submission.
+Versions before the amount-integrity fix can silently misinterpret comma-separated amounts. Do not use files generated by those versions without independently checking all amounts.
